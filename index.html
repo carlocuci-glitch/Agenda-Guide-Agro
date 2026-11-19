@@ -36,7 +36,7 @@
           <p class="text-xs text-slate-500 mt-1">Gestione Oraria (Guida Singola 60m o Doppia 30m)</p>
         </div>
       </div>
-      
+
       <!-- Data Picker, Search & Config Buttons -->
       <div class="flex flex-wrap items-center gap-2 sm:gap-3 w-full sm:w-auto">
         <div class="relative flex-1 sm:w-48">
@@ -208,7 +208,7 @@
         </div>
         <button id="closeMonthlyReportModal" class="text-emerald-100 hover:text-white text-xl p-1 leading-none">&times;</button>
       </div>
-      
+
       <div class="px-6 py-3 bg-slate-50 border-b border-slate-200 flex flex-wrap items-center justify-between gap-3 shrink-0">
         <div class="flex items-center gap-2">
           <label for="reportMonthInput" class="text-xs font-bold text-slate-700 uppercase tracking-wider">Mese:</label>
@@ -279,7 +279,7 @@
       <div class="bg-brand-700 text-white px-6 py-4 flex justify-between items-center shrink-0">
         <div>
           <h3 class="font-bold text-lg">Gestione Giornata <span id="configDateLabel" class="font-mono underline"></span></h3>
-          <p class="text-xs text-brand-100">Modifica durata e patenti ammesse solo per questa specifica data</p>
+          <p class="text-xs text-brand-100">Modifica durata, doppia guida A sui 30m e patenti ammesse solo per questa data</p>
         </div>
         <button id="closeDayConfigModal" class="text-brand-100 hover:text-white text-xl p-1 leading-none">&times;</button>
       </div>
@@ -328,7 +328,7 @@
     const app = initializeApp(firebaseConfig);
     const db = getFirestore(app);
 
-    const ALL_LICENSES = ["BE", "A / A2 / A1", "AM", "C / CE", "D / DE"];
+    const ALL_LICENSES = ["BE", "A", "A1", "A2", "AM", "C / CE", "D / DE"];
 
     const HOURS_CONFIG = [
       { id: "09:00", label: "09:00 - 10:00", period: "morning" },
@@ -348,9 +348,15 @@
       return `${year}-${month}-${day}`;
     }
 
+    function getLastDayOfMonth(monthStr) {
+      const [y, m] = monthStr.split('-').map(Number);
+      const lastDay = new Date(y, m, 0).getDate();
+      return `${monthStr}-${String(lastDay).padStart(2, '0')}`;
+    }
+
     let currentDate = getLocalDateString();
-    let currentDayData = {}; 
-    let globalHourSettings = {}; 
+    let currentDayData = {};
+    let globalHourSettings = {};
     let unsubscribeDay = null;
     let unsubscribeGlobalSettings = null;
     let lastReportData = { monthStr: '', schools: [], grandTotalGuides: 0, grandTotalMinutes: 0 };
@@ -369,14 +375,26 @@
 
     datePicker.value = currentDate;
 
+    function getCleanBookingsMap() {
+      const source = currentDayData && currentDayData.bookings ? currentDayData.bookings : currentDayData;
+      const clean = {};
+      if (!source || typeof source !== 'object') return clean;
+      Object.keys(source).forEach(key => {
+        if (key !== 'bookings' && key !== 'daySettings' && Array.isArray(source[key])) {
+          clean[key] = [...source[key]];
+        }
+      });
+      return clean;
+    }
+
     function showConfirmModal(title, message, onConfirm) {
       const confirmModal = document.getElementById('customConfirmModal');
       document.getElementById('customConfirmTitle').innerText = title;
       document.getElementById('customConfirmMessage').innerText = message;
-      
+
       const okBtn = document.getElementById('customConfirmOkBtn');
       const cancelBtn = document.getElementById('customConfirmCancelBtn');
-      
+
       const cleanUp = () => {
         confirmModal.classList.add('hidden');
         okBtn.onclick = null;
@@ -387,7 +405,7 @@
         cleanUp();
         if (onConfirm) onConfirm();
       };
-      
+
       cancelBtn.onclick = cleanUp;
       confirmModal.classList.remove('hidden');
     }
@@ -403,7 +421,7 @@
     function listenToDay(date) {
       if (unsubscribeDay) unsubscribeDay();
       const dayRef = doc(db, 'bookings_60m_licenses', date);
-      
+
       unsubscribeDay = onSnapshot(dayRef, (docSnap) => {
         currentDayData = docSnap.exists() ? docSnap.data() : {};
         renderAgenda();
@@ -421,11 +439,32 @@
       if (globalHourSettings[hourId]) {
         return globalHourSettings[hourId];
       }
-      return { singleGuide: false, allowedLicenses: ALL_LICENSES };
+      return { singleGuide: false, twinGuideA30m: false, allowedLicenses: ALL_LICENSES };
     }
 
     function isSingleHour(hourId) {
       return getDaySettings(hourId).singleGuide === true;
+    }
+
+    // Se non è guida singola (60m) ed è attiva la doppia guida A sui 30m, ci sono 2 posti per ciascun blocco da 30m (totale 4 posti nell'ora)
+    function isTwinGuideA30m(hourId) {
+      const s = getDaySettings(hourId);
+      return !s.singleGuide && s.twinGuideA30m === true;
+    }
+
+    function getMaxSeats(hourId) {
+      if (isSingleHour(hourId)) return 1;
+      return isTwinGuideA30m(hourId) ? 4 : 2;
+    }
+
+    function getSlotLabel(hourId, seatIndex) {
+      if (isSingleHour(hourId)) return "Guida Intera (60m)";
+      if (isTwinGuideA30m(hourId)) {
+        const block = seatIndex < 2 ? "1° Turno (30m)" : "2° Turno (30m)";
+        const sub = (seatIndex % 2) + 1;
+        return `${block} - Moto ${sub}`;
+      }
+      return seatIndex === 0 ? "1° Turno (30m)" : "2° Turno (30m)";
     }
 
     function getAllowedLicenses(hourId) {
@@ -440,27 +479,27 @@
       morningContainer.innerHTML = '';
       afternoonContainer.innerHTML = '';
       const filterTerm = searchInput.value.toLowerCase().trim();
-      const bookingsMap = currentDayData.bookings || currentDayData;
+      const bookingsMap = getCleanBookingsMap();
 
       let totalSlotsCount = 0;
       let bookedSlotsCount = 0;
 
       HOURS_CONFIG.forEach(hourObj => {
         const single = isSingleHour(hourObj.id);
-        const maxSeats = single ? 1 : 2; 
+        const twinA = isTwinGuideA30m(hourObj.id);
+        const maxSeats = getMaxSeats(hourObj.id);
         const allowedLics = getAllowedLicenses(hourObj.id);
         totalSlotsCount += maxSeats;
 
-        const hourBookings = bookingsMap[hourObj.id] || [null, null];
+        const hourBookings = bookingsMap[hourObj.id] || [];
 
-        let matchAny = false;
         if (filterTerm) {
-          matchAny = hourBookings.some(b => {
+          const matchAny = hourBookings.slice(0, maxSeats).some(b => {
             if (!b) return false;
-            return b.name.toLowerCase().includes(filterTerm) ||
+            return (b.name && b.name.toLowerCase().includes(filterTerm)) ||
                    (b.school && b.school.toLowerCase().includes(filterTerm)) ||
                    (b.notes && b.notes.toLowerCase().includes(filterTerm)) ||
-                   b.license.toLowerCase().includes(filterTerm);
+                   (b.license && b.license.toLowerCase().includes(filterTerm));
           });
           if (!matchAny) return;
         }
@@ -468,13 +507,19 @@
         const slotEl = document.createElement('div');
         slotEl.className = "p-4 sm:p-5 flex flex-col gap-3 transition-colors hover:bg-slate-50/80 border-b border-slate-100 last:border-b-0";
 
-        let badgeType = single 
-          ? `<span class="text-xs bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded font-medium">⏱️ Singola (60m)</span>` 
-          : `<span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded font-medium">⏱️ Doppia (30m+30m)</span>`;
+        let badgeType = single
+          ? `<span class="text-xs bg-amber-50 text-amber-700 border border-amber-200 px-2 py-0.5 rounded font-medium">⏱️ Singola (60m)</span>`
+          : twinA
+            ? `<span class="text-xs bg-teal-50 text-teal-700 border border-teal-200 px-2 py-0.5 rounded font-medium">🏍️ 2×30m con 2 Guide A (4 posti)</span>`
+            : `<span class="text-xs bg-blue-50 text-blue-700 border border-blue-200 px-2 py-0.5 rounded font-medium">⏱️ Doppia (30m+30m)</span>`;
 
-        let restrictionText = allowedLics.length < ALL_LICENSES.length 
-          ? `<span class="text-xs bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded font-medium">Patenti: ${allowedLics.join(', ')}</span>`
+        let restrictionText = allowedLics.length < ALL_LICENSES.length
+          ? `<span class="text-xs bg-purple-50 text-purple-700 border border-purple-200 px-2 py-0.5 rounded font-medium">Patenti: ${escapeHtml(allowedLics.join(', '))}</span>`
           : '';
+
+        const gridColsClass = maxSeats === 4
+          ? "grid-cols-1 sm:grid-cols-2 lg:grid-cols-4"
+          : `grid-cols-1 md:grid-cols-${maxSeats}`;
 
         let htmlContent = `
           <div class="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-100">
@@ -484,24 +529,24 @@
               ${restrictionText}
             </div>
           </div>
-          <div class="grid grid-cols-1 md:grid-cols-${maxSeats} gap-3">
+          <div class="grid ${gridColsClass} gap-3">
         `;
 
         for (let i = 0; i < maxSeats; i++) {
           const data = hourBookings[i];
           const isBooked = !!data;
-          const subLabel = single ? "Guida Intera (60m)" : (i === 0 ? "1° Turno (30m)" : "2° Turno (30m)");
+          const subLabel = getSlotLabel(hourObj.id, i);
 
           if (isBooked) bookedSlotsCount++;
 
           if (!isBooked) {
             htmlContent += `
               <div class="p-3 bg-slate-50 border border-slate-200 rounded-xl flex items-center justify-between gap-2">
-                <div class="flex items-center gap-2">
-                  <span class="w-6 h-6 rounded-full bg-slate-200 text-slate-600 font-bold text-xs flex items-center justify-center">${i+1}</span>
-                  <span class="text-xs text-slate-400 italic">${subLabel} - Libero</span>
+                <div class="flex items-center gap-2 min-w-0">
+                  <span class="w-6 h-6 rounded-full bg-slate-200 text-slate-600 font-bold text-xs flex items-center justify-center shrink-0">${i+1}</span>
+                  <span class="text-xs text-slate-400 italic truncate">${subLabel} - Libero</span>
                 </div>
-                <button type="button" onclick="requestSlotAccess('${hourObj.id}', ${i}, 'book')" class="px-3 py-1.5 bg-brand-50 text-brand-600 hover:bg-brand-600 hover:text-white rounded-lg text-xs font-semibold border border-brand-100 transition-all flex items-center gap-1.5">
+                <button type="button" onclick="requestSlotAccess('${hourObj.id}', ${i}, 'book')" class="px-3 py-1.5 bg-brand-50 text-brand-600 hover:bg-brand-600 hover:text-white rounded-lg text-xs font-semibold border border-brand-100 transition-all flex items-center gap-1.5 shrink-0">
                   <svg class="w-3.5 h-3.5 fill-current" viewBox="0 0 24 24"><path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z"/></svg> Prenota
                 </button>
               </div>
@@ -523,7 +568,7 @@
                     <div class="flex items-center gap-1.5 flex-wrap">
                       <span class="text-[11px] font-semibold text-slate-500">${subLabel}:</span>
                       <span class="font-bold text-slate-900 text-sm truncate">${escapeHtml(data.name)}</span>
-                      <span class="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-semibold rounded">${data.license}</span>
+                      <span class="px-1.5 py-0.5 bg-slate-100 text-slate-600 text-[10px] font-semibold rounded">${escapeHtml(data.license)}</span>
                       ${statusBadge}
                       ${lockBadge}
                     </div>
@@ -558,7 +603,7 @@
     }
 
     window.requestSlotAccess = function(hourId, seatIndex, action) {
-      const bookingsMap = currentDayData.bookings || currentDayData;
+      const bookingsMap = getCleanBookingsMap();
       const bookings = bookingsMap[hourId] || [];
       const booking = bookings[seatIndex];
 
@@ -568,7 +613,7 @@
         if (action === 'delete') deleteBooking(hourId, seatIndex);
         else openBookingModal(hourId, seatIndex);
       }
-    }
+    };
 
     function openPinModal(hourId, seatIndex, action) {
       const pinInput = document.getElementById('pinInputVerify');
@@ -578,7 +623,7 @@
       pinModal.classList.remove('hidden');
       pinInput.focus();
 
-      const bookingsMap = currentDayData.bookings || currentDayData;
+      const bookingsMap = getCleanBookingsMap();
       const bookings = bookingsMap[hourId] || [];
       const booking = bookings[seatIndex];
       const verifyBtn = document.getElementById('pinSubmitBtn');
@@ -588,9 +633,10 @@
         pinModal.classList.add('hidden');
         verifyBtn.onclick = null;
         cancelBtn.onclick = null;
+        pinInput.onkeydown = null;
       };
 
-      verifyBtn.onclick = () => {
+      const attemptVerify = () => {
         if (pinInput.value === booking.pin) {
           cleanup();
           if (action === 'delete') deleteBooking(hourId, seatIndex);
@@ -600,6 +646,14 @@
           pinInput.focus();
         }
       };
+
+      verifyBtn.onclick = attemptVerify;
+      pinInput.onkeydown = (e) => {
+        if (e.key === 'Enter') {
+          e.preventDefault();
+          attemptVerify();
+        }
+      };
       cancelBtn.onclick = cleanup;
     }
 
@@ -607,14 +661,13 @@
       document.getElementById('modalHourSlot').value = hourId;
       document.getElementById('modalStudentIndex').value = seatIndex;
       const hourObj = HOURS_CONFIG.find(h => h.id === hourId);
-      const single = isSingleHour(hourId);
-      const durationText = single ? "Guida Singola (60m)" : `Turno ${seatIndex + 1} (30m)`;
-      document.getElementById('modalSub').innerText = `Orario: ${hourObj.label} - ${durationText}`;
+      const slotLabel = getSlotLabel(hourId, seatIndex);
+      document.getElementById('modalSub').innerText = `Orario: ${hourObj.label} - ${slotLabel}`;
 
       const allowed = getAllowedLicenses(hourId);
       const licenseSelect = document.getElementById('licenseType');
       licenseSelect.innerHTML = '';
-      
+
       allowed.forEach(lic => {
         const opt = document.createElement('option');
         opt.value = lic;
@@ -622,7 +675,7 @@
         licenseSelect.appendChild(opt);
       });
 
-      const bookingsMap = currentDayData.bookings || currentDayData;
+      const bookingsMap = getCleanBookingsMap();
       const bookings = bookingsMap[hourId] || [];
       const existing = bookings[seatIndex];
 
@@ -649,8 +702,9 @@
 
     window.deleteBooking = function(hourId, seatIndex) {
       showConfirmModal("Cancellazione Prenotazione", "Sei sicuro di voler eliminare questa prenotazione?", async () => {
-        let bookingsMap = currentDayData.bookings ? {...currentDayData.bookings} : {...currentDayData};
-        let bookings = [...(bookingsMap[hourId] || [null, null])];
+        const bookingsMap = getCleanBookingsMap();
+        const maxSeats = getMaxSeats(hourId);
+        const bookings = [...(bookingsMap[hourId] || Array(maxSeats).fill(null))];
         bookings[seatIndex] = null;
 
         if (bookings.every(b => !b)) {
@@ -659,7 +713,10 @@
           bookingsMap[hourId] = bookings;
         }
 
-        let docPayload = currentDayData.daySettings ? { ...currentDayData, bookings: bookingsMap } : bookingsMap;
+        const docPayload = {
+          bookings: bookingsMap,
+          daySettings: currentDayData.daySettings || {}
+        };
 
         try {
           await setDoc(doc(db, 'bookings_60m_licenses', currentDate), docPayload);
@@ -667,7 +724,7 @@
           console.error("Errore cancellazione:", e);
         }
       });
-    }
+    };
 
     bookingForm.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -676,24 +733,27 @@
       saveBtn.innerText = "Salvataggio...";
 
       const hourId = document.getElementById('modalHourSlot').value;
-      const seatIndex = parseInt(document.getElementById('modalStudentIndex').value);
-      const single = isSingleHour(hourId);
-      const maxSeats = single ? 1 : 2;
+      const seatIndex = parseInt(document.getElementById('modalStudentIndex').value, 10);
+      const maxSeats = getMaxSeats(hourId);
 
-      let bookingsMap = currentDayData.bookings ? {...currentDayData.bookings} : {...currentDayData};
-      let bookings = [...(bookingsMap[hourId] || Array(maxSeats).fill(null))];
-      
+      const bookingsMap = getCleanBookingsMap();
+      const bookings = [...(bookingsMap[hourId] || Array(maxSeats).fill(null))];
+      while (bookings.length < maxSeats) bookings.push(null);
+
       bookings[seatIndex] = {
-        name: document.getElementById('studentName').value,
-        school: document.getElementById('schoolName').value,
+        name: document.getElementById('studentName').value.trim(),
+        school: document.getElementById('schoolName').value.trim(),
         license: document.getElementById('licenseType').value,
         status: document.getElementById('bookingStatus').value,
         pin: document.getElementById('bookingPin').value.trim(),
-        notes: document.getElementById('bookingNotes').value
+        notes: document.getElementById('bookingNotes').value.trim()
       };
 
       bookingsMap[hourId] = bookings;
-      let docPayload = currentDayData.daySettings ? { ...currentDayData, bookings: bookingsMap } : bookingsMap;
+      const docPayload = {
+        bookings: bookingsMap,
+        daySettings: currentDayData.daySettings || {}
+      };
 
       try {
         await setDoc(doc(db, 'bookings_60m_licenses', currentDate), docPayload);
@@ -705,6 +765,33 @@
         saveBtn.innerText = "Salva Prenotazione";
       }
     });
+
+    function attachConfigControlsListeners(container) {
+      container.querySelectorAll('.config-single-toggle').forEach(singleToggle => {
+        const hourId = singleToggle.dataset.hourId;
+        const twinToggle = container.querySelector(`.config-twin-a-toggle[data-hour-id="${hourId}"]`);
+        const singleLabel = singleToggle.parentElement.querySelector('.single-mode-label');
+
+        const syncState = () => {
+          if (singleLabel) {
+            singleLabel.textContent = singleToggle.checked ? 'Singola (60m)' : 'Doppia (30m+30m)';
+          }
+          if (twinToggle) {
+            if (singleToggle.checked) {
+              twinToggle.checked = false;
+              twinToggle.disabled = true;
+              twinToggle.closest('label').classList.add('opacity-50', 'cursor-not-allowed');
+            } else {
+              twinToggle.disabled = false;
+              twinToggle.closest('label').classList.remove('opacity-50', 'cursor-not-allowed');
+            }
+          }
+        };
+
+        singleToggle.addEventListener('change', syncState);
+        syncState();
+      });
+    }
 
     // --- REPORT MENSILE PER AUTOSCUOLA ---
     function formatMinutesToHours(totalMinutes) {
@@ -720,7 +807,7 @@
       bodyEl.innerHTML = `<div class="text-center py-10 text-sm text-slate-500">Elaborazione conteggio mensile in corso...</div>`;
 
       const startDate = `${monthStr}-01`;
-      const endDate = `${monthStr}-31`;
+      const endDate = getLastDayOfMonth(monthStr);
 
       try {
         const q = query(
@@ -740,18 +827,15 @@
           const dayBookings = dayDoc.bookings || dayDoc;
 
           Object.keys(dayBookings).forEach(hourId => {
-            if (hourId === 'daySettings') return;
+            if (hourId === 'daySettings' || hourId === 'bookings') return;
             const slots = dayBookings[hourId];
             if (!Array.isArray(slots)) return;
 
-            let single = false;
-            if (daySettingsMap[hourId] && typeof daySettingsMap[hourId].singleGuide === 'boolean') {
-              single = daySettingsMap[hourId].singleGuide;
-            } else if (globalHourSettings[hourId]) {
-              single = globalHourSettings[hourId].singleGuide === true;
-            }
-
-            const activeSlots = single ? [slots[0]] : slots;
+            const hourSetting = daySettingsMap[hourId] || globalHourSettings[hourId] || {};
+            const single = hourSetting.singleGuide === true;
+            const twinA = !single && hourSetting.twinGuideA30m === true;
+            const maxSeats = single ? 1 : (twinA ? 4 : 2);
+            const activeSlots = slots.slice(0, maxSeats);
             const durationMin = single ? 60 : 30;
 
             activeSlots.forEach(booking => {
@@ -897,7 +981,7 @@
         <html lang="it">
         <head>
           <meta charset="UTF-8">
-          <title>Report Mensile Autoscuole - ${monthStr}</title>
+          <title>Report Mensile Autoscuole - ${escapeHtml(monthStr)}</title>
           <style>
             body { font-family: Arial, sans-serif; color: #111; margin: 20px; font-size: 13px; }
             h1 { font-size: 18px; margin-bottom: 4px; }
@@ -911,7 +995,7 @@
         </head>
         <body>
           <h1>RIEPILOGO MENSILE GUIDE PER AUTOSCUOLA</h1>
-          <div class="sub">Periodo di riferimento: <strong>${monthStr}</strong></div>
+          <div class="sub">Periodo di riferimento: <strong>${escapeHtml(monthStr)}</strong></div>
           <table>
             <thead>
               <tr>
@@ -946,49 +1030,51 @@
     // Stampa Report Giornaliero
     document.getElementById('printDailyBtn').addEventListener('click', () => {
       const printWindow = window.open('', '_blank', 'width=800,height=600');
-      
+      const bookingsMap = getCleanBookingsMap();
+
       let htmlContent = `
         <!DOCTYPE html>
         <html lang="it">
         <head>
           <meta charset="UTF-8">
-          <title>Report Guide - ${currentDate}</title>
+          <title>Report Guide - ${escapeHtml(currentDate)}</title>
           <style>
             body { font-family: Arial, sans-serif; color: #111; margin: 20px; font-size: 14px; }
             h1 { font-size: 20px; margin-bottom: 5px; }
             .subtitle { font-size: 14px; color: #555; margin-bottom: 20px; border-bottom: 2px solid #333; padding-bottom: 10px; }
             .hour-row { display: flex; border-bottom: 1px solid #ddd; padding: 10px 0; align-items: flex-start; }
-            .time { font-weight: bold; width: 130px; flex-shrink: 0; }
-            .details { flex-grow: 1; display: flex; gap: 15px; flex-wrap: wrap; }
-            .student-box { background: #f9f9f9; border: 1px solid #ccc; padding: 6px 10px; border-radius: 4px; width: 45%; }
+            .time { font-weight: bold; width: 170px; flex-shrink: 0; }
+            .details { flex-grow: 1; display: flex; gap: 10px; flex-wrap: wrap; }
+            .student-box { background: #f9f9f9; border: 1px solid #ccc; padding: 6px 10px; border-radius: 4px; width: 47%; box-sizing: border-box; }
             .empty { color: #888; font-style: italic; }
             @media print { .no-print { display: none; } }
           </style>
         </head>
         <body>
           <h1>AGENDA GUIDE - RIEPILOGO GIORNALIERO</h1>
-          <div class="subtitle">Data: <strong>${currentDate}</strong></div>
+          <div class="subtitle">Data: <strong>${escapeHtml(currentDate)}</strong></div>
       `;
 
       HOURS_CONFIG.forEach(hourObj => {
         const single = isSingleHour(hourObj.id);
-        const maxSeats = single ? 1 : 2;
-        const bookingsMap = currentDayData.bookings || currentDayData;
+        const twinA = isTwinGuideA30m(hourObj.id);
+        const maxSeats = getMaxSeats(hourObj.id);
         const bookings = bookingsMap[hourObj.id] || [];
+        const modeTag = single ? '(60m)' : (twinA ? '(2×30m · 2 A)' : '(30m+30m)');
 
-        htmlContent += `<div class="hour-row"><div class="time">${hourObj.label} ${single ? '(60m)' : '(30m+30m)'}</div><div class="details">`;
+        htmlContent += `<div class="hour-row"><div class="time">${hourObj.label} ${modeTag}</div><div class="details">`;
 
         let hasBookings = false;
         for (let i = 0; i < maxSeats; i++) {
           const data = bookings[i];
           if (data) {
             hasBookings = true;
-            const labelTurno = single ? "Guida 60m" : (i === 0 ? "1° Turno (30m)" : "2° Turno (30m)");
+            const labelTurno = getSlotLabel(hourObj.id, i);
             htmlContent += `
               <div class="student-box">
-                <strong>${labelTurno}:</strong> ${data.name} (${data.license}) ${data.pin ? '🔒' : ''}<br>
-                ${data.school ? `<small>Sede: ${data.school}</small><br>` : ''}
-                ${data.notes ? `<small>Note: ${data.notes}</small>` : ''}
+                <strong>${labelTurno}:</strong> ${escapeHtml(data.name)} (${escapeHtml(data.license)}) ${data.pin ? '🔒' : ''}<br>
+                ${data.school ? `<small>Sede: ${escapeHtml(data.school)}</small><br>` : ''}
+                ${data.notes ? `<small>Note: ${escapeHtml(data.notes)}</small>` : ''}
               </div>
             `;
           }
@@ -1011,43 +1097,62 @@
       printWindow.document.close();
     });
 
+    function buildConfigCard(hourObj, settings, prefix, isOverridden = false, activeColorClass = 'peer-checked:bg-slate-900', checkboxColorClass = 'text-slate-800 focus:ring-slate-700') {
+      const single = settings.singleGuide === true;
+      const twinA = !single && settings.twinGuideA30m === true;
+      const allowedLics = Array.isArray(settings.allowedLicenses) && settings.allowedLicenses.length > 0
+        ? settings.allowedLicenses
+        : ALL_LICENSES;
+
+      const card = document.createElement('div');
+      card.className = "p-4 border border-slate-200 rounded-xl bg-slate-50 space-y-3 shadow-sm";
+      card.innerHTML = `
+        <div class="flex items-center justify-between border-b border-slate-200 pb-2 flex-wrap gap-3">
+          <div class="flex items-center gap-2">
+            <span class="font-bold text-slate-800 text-sm font-mono">${hourObj.label}</span>
+            ${isOverridden ? '<span class="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-semibold rounded">Personalizzato per oggi</span>' : ''}
+          </div>
+          <div class="flex items-center gap-4 flex-wrap">
+            <label class="relative inline-flex items-center cursor-pointer">
+              <input type="checkbox" class="sr-only peer config-single-toggle ${prefix}-single-toggle" data-hour-id="${hourObj.id}" ${single ? 'checked' : ''}>
+              <div class="w-9 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all ${activeColorClass}"></div>
+              <span class="ml-2 text-xs font-semibold text-slate-600 single-mode-label">${single ? 'Singola (60m)' : 'Doppia (30m+30m)'}</span>
+            </label>
+            <label class="inline-flex items-center gap-1.5 bg-teal-50 border border-teal-200 px-2.5 py-1 rounded-lg text-xs font-semibold text-teal-800 cursor-pointer">
+              <input type="checkbox" class="config-twin-a-toggle ${prefix}-twin-a-toggle rounded text-teal-700 focus:ring-teal-600" data-hour-id="${hourObj.id}" ${twinA ? 'checked' : ''}>
+              2 Guide A nei 30m (4 posti/h)
+            </label>
+          </div>
+        </div>
+        <div>
+          <span class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Patenti Ammesse:</span>
+          <div class="flex flex-wrap gap-2">
+            ${ALL_LICENSES.map(lic => {
+              const checked = allowedLics.includes(lic);
+              return `
+                <label class="inline-flex items-center gap-1.5 bg-white border border-slate-200 px-2 py-1 rounded-lg text-xs font-medium cursor-pointer hover:bg-slate-100 transition-colors">
+                  <input type="checkbox" value="${lic}" data-hour-id="${hourObj.id}" class="${prefix}-lic-checkbox rounded ${checkboxColorClass}" ${checked ? 'checked' : ''}>
+                  ${lic}
+                </label>
+              `;
+            }).join('')}
+          </div>
+        </div>
+      `;
+      return card;
+    }
+
     // --- CONFIGURAZIONE GLOBALE (Tutto il Mese) ---
     document.getElementById('openGlobalConfigBtn').addEventListener('click', () => {
       const container = document.getElementById('globalConfigSlotsList');
       container.innerHTML = '';
 
       HOURS_CONFIG.forEach(hourObj => {
-        const single = globalHourSettings[hourObj.id] ? globalHourSettings[hourObj.id].singleGuide === true : false;
-        const allowedLics = (globalHourSettings[hourObj.id] && globalHourSettings[hourObj.id].allowedLicenses) || ALL_LICENSES;
-
-        const card = document.createElement('div');
-        card.className = "p-4 border border-slate-200 rounded-xl bg-slate-50 space-y-3 shadow-sm";
-        card.innerHTML = `
-          <div class="flex items-center justify-between border-b border-slate-200 pb-2 flex-wrap gap-2">
-            <span class="font-bold text-slate-800 text-sm font-mono">${hourObj.label} (${hourObj.period === 'morning' ? 'Mattina' : 'Pomeriggio'})</span>
-            <label class="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" class="sr-only peer global-single-toggle" data-hour-id="${hourObj.id}" ${single ? 'checked' : ''}>
-              <div class="w-9 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-slate-900"></div>
-              <span class="ml-2 text-xs font-semibold text-slate-600">${single ? 'Singola (60m)' : 'Doppia (30m+30m)'}</span>
-            </label>
-          </div>
-          <div>
-            <span class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Patenti Ammesse (Globale):</span>
-            <div class="flex flex-wrap gap-2">
-              ${ALL_LICENSES.map(lic => {
-                const checked = allowedLics.includes(lic);
-                return `
-                  <label class="inline-flex items-center gap-1.5 bg-white border border-slate-200 px-2 py-1 rounded-lg text-xs font-medium cursor-pointer hover:bg-slate-100 transition-colors">
-                    <input type="checkbox" value="${lic}" data-hour-id="${hourObj.id}" class="global-lic-checkbox rounded text-slate-800 focus:ring-slate-700" ${checked ? 'checked' : ''}>
-                    ${lic}
-                  </label>
-                `;
-              }).join('')}
-            </div>
-          </div>
-        `;
-        container.appendChild(card);
+        const settings = globalHourSettings[hourObj.id] || { singleGuide: false, twinGuideA30m: false, allowedLicenses: ALL_LICENSES };
+        container.appendChild(buildConfigCard(hourObj, settings, 'global', false, 'peer-checked:bg-slate-900', 'text-slate-800 focus:ring-slate-700'));
       });
+
+      attachConfigControlsListeners(container);
       globalConfigModal.classList.remove('hidden');
     });
 
@@ -1055,14 +1160,17 @@
       const newSettings = {};
       HOURS_CONFIG.forEach(hourObj => {
         const toggle = document.querySelector(`.global-single-toggle[data-hour-id="${hourObj.id}"]`);
+        const twinToggle = document.querySelector(`.global-twin-a-toggle[data-hour-id="${hourObj.id}"]`);
         const licCheckboxes = document.querySelectorAll(`.global-lic-checkbox[data-hour-id="${hourObj.id}"]:checked`);
-        
+
         let allowedLicenses = Array.from(licCheckboxes).map(cb => cb.value);
         if (allowedLicenses.length === 0) allowedLicenses = ALL_LICENSES;
 
-        newSettings[hourObj.id] = { 
-          singleGuide: toggle ? toggle.checked : false,
-          allowedLicenses: allowedLicenses
+        const singleGuide = toggle ? toggle.checked : false;
+        newSettings[hourObj.id] = {
+          singleGuide,
+          twinGuideA30m: !singleGuide && twinToggle ? twinToggle.checked : false,
+          allowedLicenses
         };
       });
 
@@ -1081,41 +1189,12 @@
       container.innerHTML = '';
 
       HOURS_CONFIG.forEach(hourObj => {
-        const single = isSingleHour(hourObj.id);
-        const allowedLics = getAllowedLicenses(hourObj.id);
-        const isOverridden = currentDayData.daySettings && currentDayData.daySettings[hourObj.id];
-
-        const card = document.createElement('div');
-        card.className = "p-4 border border-slate-200 rounded-xl bg-slate-50 space-y-3 shadow-sm";
-        card.innerHTML = `
-          <div class="flex items-center justify-between border-b border-slate-200 pb-2 flex-wrap gap-2">
-            <div class="flex items-center gap-2">
-              <span class="font-bold text-slate-800 text-sm font-mono">${hourObj.label}</span>
-              ${isOverridden ? '<span class="px-1.5 py-0.5 bg-amber-100 text-amber-800 text-[10px] font-semibold rounded">Personalizzato per oggi</span>' : ''}
-            </div>
-            <label class="relative inline-flex items-center cursor-pointer">
-              <input type="checkbox" class="sr-only peer day-single-toggle" data-hour-id="${hourObj.id}" ${single ? 'checked' : ''}>
-              <div class="w-9 h-5 bg-slate-300 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-brand-600"></div>
-              <span class="ml-2 text-xs font-semibold text-slate-600">${single ? 'Singola (60m)' : 'Doppia (30m+30m)'}</span>
-            </label>
-          </div>
-          <div>
-            <span class="block text-xs font-semibold text-slate-500 uppercase tracking-wider mb-1.5">Patenti Ammesse (Oggi):</span>
-            <div class="flex flex-wrap gap-2">
-              ${ALL_LICENSES.map(lic => {
-                const checked = allowedLics.includes(lic);
-                return `
-                  <label class="inline-flex items-center gap-1.5 bg-white border border-slate-200 px-2 py-1 rounded-lg text-xs font-medium cursor-pointer hover:bg-slate-100 transition-colors">
-                    <input type="checkbox" value="${lic}" data-hour-id="${hourObj.id}" class="day-lic-checkbox rounded text-brand-600 focus:ring-brand-500" ${checked ? 'checked' : ''}>
-                    ${lic}
-                  </label>
-                `;
-              }).join('')}
-            </div>
-          </div>
-        `;
-        container.appendChild(card);
+        const settings = getDaySettings(hourObj.id);
+        const isOverridden = !!(currentDayData.daySettings && currentDayData.daySettings[hourObj.id]);
+        container.appendChild(buildConfigCard(hourObj, settings, 'day', isOverridden, 'peer-checked:bg-brand-600', 'text-brand-600 focus:ring-brand-500'));
       });
+
+      attachConfigControlsListeners(container);
       dayConfigModal.classList.remove('hidden');
     });
 
@@ -1123,21 +1202,22 @@
       const newDaySettings = {};
       HOURS_CONFIG.forEach(hourObj => {
         const toggle = document.querySelector(`.day-single-toggle[data-hour-id="${hourObj.id}"]`);
+        const twinToggle = document.querySelector(`.day-twin-a-toggle[data-hour-id="${hourObj.id}"]`);
         const licCheckboxes = document.querySelectorAll(`.day-lic-checkbox[data-hour-id="${hourObj.id}"]:checked`);
-        
+
         let allowedLicenses = Array.from(licCheckboxes).map(cb => cb.value);
         if (allowedLicenses.length === 0) allowedLicenses = ALL_LICENSES;
 
-        newDaySettings[hourObj.id] = { 
-          singleGuide: toggle ? toggle.checked : false,
-          allowedLicenses: allowedLicenses
+        const singleGuide = toggle ? toggle.checked : false;
+        newDaySettings[hourObj.id] = {
+          singleGuide,
+          twinGuideA30m: !singleGuide && twinToggle ? twinToggle.checked : false,
+          allowedLicenses
         };
       });
 
-      const bookingsMap = currentDayData.bookings || currentDayData;
       const updatedDoc = {
-        ...(typeof currentDayData === 'object' ? currentDayData : {}),
-        bookings: bookingsMap,
+        bookings: getCleanBookingsMap(),
         daySettings: newDaySettings
       };
 
@@ -1151,9 +1231,8 @@
 
     document.getElementById('resetDayConfigBtn').addEventListener('click', async () => {
       showConfirmModal("Ripristina Standard", "Vuoi rimuovere le personalizzazioni di questa giornata e tornare alle regole globali del mese?", async () => {
-        const bookingsMap = currentDayData.bookings || currentDayData;
         const updatedDoc = {
-          bookings: bookingsMap,
+          bookings: getCleanBookingsMap(),
           daySettings: {}
         };
         try {
